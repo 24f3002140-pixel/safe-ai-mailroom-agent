@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: safe-ai-mailroom-agent
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker -w 1 -b 0.0.0.0:$PORT app:app
+    healthCheckPath: /
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: DB_PATH
+        value: /var/data/mailroom.db
+    disk:
+      name: mailroom-data
+      mountPath: /var/data
+      sizeGB: 1
