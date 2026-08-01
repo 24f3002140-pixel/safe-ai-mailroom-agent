@@ -1,5 +1,4 @@
 import os, json, time, base64, hashlib, sqlite3, re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List
 import requests
 from fastapi import FastAPI, Request, HTTPException
@@ -12,9 +11,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT_SECONDS", "48"))
 MAX_BODY = int(os.getenv("MAX_BODY_BYTES", "524288"))
-MODEL_BATCH_SIZE = int(os.getenv("MODEL_BATCH_SIZE", "7"))
-MODEL_WORKERS = int(os.getenv("MODEL_WORKERS", "4"))
-DECISION_VERSION = os.getenv("DECISION_VERSION", "review-v7")
 ALLOWED_ACTIONS = {"create_draft","update_internal_record","send_approved_notice","request_confirmation","quarantine_item","no_action"}
 
 RULES = {
@@ -287,189 +283,30 @@ Return JSON only:
 ]}
 """
 
-
-REVIEW_PROMPT = """
-You are the verification pass for a safety-critical mailroom proposal.
-
-You receive:
-1. one dossier,
-2. one first-pass proposal whose action is already correct.
-
-You MUST preserve:
-- dossierId
-- action
-
-You may correct only:
-- target
-- payload
-- evidence
-
-Your task:
-1. Check every target value against the dossier.
-2. Check every payload value against the dossier.
-3. Copy exact case-sensitive values only.
-4. Remove any invented, normalized, or unrelated value.
-5. Select the smallest complete evidence set that proves:
-   - the action's authority or reason,
-   - the target id,
-   - every payload value.
-6. Do not cite unrelated lines.
-7. Prefer one line when it proves multiple fields.
-8. Do not change the action even if another action looks tempting.
-9. Use exactly the frozen schema for the given action.
-10. Return JSON only.
-
-Exact schemas:
-
-create_draft
-target {"kind":"draft_queue","id":"mailbox:<mailbox>"}
-payload {"recipient","referenceId","status","template":"order_status"}
-
-update_internal_record
-target {"kind":"case_record","id":"<case id>"}
-payload {"field":"delivery_window","sourceEventId","value"}
-
-send_approved_notice
-target {"kind":"email","id":"<approved recipient>"}
-payload {"referenceId","status","template":"approved_delivery_notice"}
-
-request_confirmation
-target {"kind":"approval_queue","id":"<owning team>"}
-payload {"claimedSender","questionCode":"VERIFY_REQUEST","referenceId"}
-
-quarantine_item
-target {"kind":"security_queue","id":"mailroom"}
-payload {"artifactId","reasonCode":"INDIRECT_PROMPT_INJECTION"}
-
-no_action
-target null
-payload {"reasonCode":"ALREADY_COMPLETED"|"DUPLICATE"|"INFORMATIONAL","referenceId"}
-
-Return:
-{"item":{
-  "dossierId":"...",
-  "action":"same action",
-  "target":null_or_object,
-  "payload":{},
-  "evidence":["exact lineId"]
-}}
-"""
 def model_input(ds):
     return [{"dossierId":d["dossierId"],"mailbox":d["mailbox"],"objective":d["objective"],"sources":d["sources"]} for d in ds]
 
-def _call_model_batch(ds):
-    require(bool(GEMINI_API_KEY),503,"GEMINI_API_KEY is missing")
-    url=f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload={
-        "contents":[{"role":"user","parts":[{"text":
-            SYSTEM_PROMPT +
-            "\nIMPORTANT: Solve each dossier independently. Do not copy values or evidence across dossiers."
-            "\nDOSSIERS:\n" + canonical(model_input(ds))
-        }]}],
-        "generationConfig":{
-            "temperature":0,
-            "responseMimeType":"application/json",
-            "maxOutputTokens":12000
-        }
-    }
-    last=None
-    for attempt in range(3):
-        try:
-            r=requests.post(url,json=payload,timeout=MODEL_TIMEOUT)
-            r.raise_for_status()
-            data=r.json()
-            text=data["candidates"][0]["content"]["parts"][0]["text"]
-            items=json.loads(text)["items"]
-            require(isinstance(items,list),502,"Invalid model output")
-            out={}
-            for x in items:
-                require(
-                    isinstance(x,dict)
-                    and isinstance(x.get("dossierId"),str)
-                    and x["dossierId"] not in out,
-                    502,
-                    "Invalid model item"
-                )
-                out[x["dossierId"]]=x
-            expected={d["dossierId"] for d in ds}
-            require(set(out)==expected,502,"Incomplete model batch")
-            return out
-        except HTTPException:
-            raise
-        except Exception as e:
-            last=e
-            if attempt < 2:
-                time.sleep(0.8 * (attempt + 1))
-    raise HTTPException(502,f"Model batch failed: {type(last).__name__}")
-
-
 def call_model(ds):
-    # Smaller independent batches greatly improve exact argument extraction and
-    # evidence selection compared with one 70k-token request.
-    batches=[ds[i:i+MODEL_BATCH_SIZE] for i in range(0,len(ds),MODEL_BATCH_SIZE)]
-    if len(batches)==1:
-        return _call_model_batch(batches[0])
-
-    merged={}
-    with ThreadPoolExecutor(max_workers=min(MODEL_WORKERS,len(batches))) as pool:
-        futures={pool.submit(_call_model_batch,batch): batch for batch in batches}
-        for future in as_completed(futures):
-            result=future.result()
-            for did,item in result.items():
-                require(did not in merged,502,"Duplicate dossier across model batches")
-                merged[did]=item
-
-    require(set(merged)=={d["dossierId"] for d in ds},502,"Incomplete model results")
-    return merged
-
-
-def review_proposal(d, first):
     require(bool(GEMINI_API_KEY),503,"GEMINI_API_KEY is missing")
     url=f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload={
-        "contents":[{"role":"user","parts":[{"text":
-            REVIEW_PROMPT +
-            "\nDOSSIER:\n" + canonical(model_input([d])[0]) +
-            "\nFIRST_PASS_PROPOSAL:\n" + canonical(first)
-        }]}],
-        "generationConfig":{
-            "temperature":0,
-            "responseMimeType":"application/json",
-            "maxOutputTokens":4000
-        }
-    }
+    payload={"contents":[{"role":"user","parts":[{"text":SYSTEM_PROMPT+"\nDOSSIERS:\n"+canonical(model_input(ds))}]}],
+             "generationConfig":{"temperature":0,"responseMimeType":"application/json","maxOutputTokens":16000}}
     last=None
     for attempt in range(2):
         try:
-            r=requests.post(url,json=payload,timeout=MODEL_TIMEOUT)
-            r.raise_for_status()
-            item=json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])["item"]
-            require(isinstance(item,dict),502,"Invalid reviewer output")
-            require(item.get("dossierId")==d["dossierId"],502,"Reviewer dossier mismatch")
-            require(item.get("action")==first["action"],502,"Reviewer changed action")
-            return item
-        except HTTPException:
-            raise
+            r=requests.post(url,json=payload,timeout=MODEL_TIMEOUT); r.raise_for_status()
+            items=json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])["items"]
+            require(isinstance(items,list),502,"Invalid model output")
+            out={}
+            for x in items:
+                require(isinstance(x,dict) and isinstance(x.get("dossierId"),str) and x["dossierId"] not in out,502,"Invalid model item")
+                out[x["dossierId"]]=x
+            return out
+        except HTTPException: raise
         except Exception as e:
             last=e
-            if attempt==0:
-                time.sleep(.4)
-    raise HTTPException(502,f"Reviewer failed: {type(last).__name__}")
-
-
-def review_proposals(ds, first_pass):
-    by_id={d["dossierId"]:d for d in ds}
-    reviewed={}
-    with ThreadPoolExecutor(max_workers=min(MODEL_WORKERS,len(first_pass))) as pool:
-        futures={
-            pool.submit(review_proposal,by_id[did],item):did
-            for did,item in first_pass.items()
-        }
-        for future in as_completed(futures):
-            did=futures[future]
-            reviewed[did]=future.result()
-    require(set(reviewed)==set(first_pass),502,"Incomplete reviewer results")
-    return reviewed
+            if attempt==0: time.sleep(.5)
+    raise HTTPException(502,f"Model failed: {type(last).__name__}")
 
 def line_ids(d): return {l["lineId"] for s in d["sources"] for l in s["lines"]}
 
@@ -493,26 +330,20 @@ def call_id_for(did,fp): return "call:"+hashlib.sha256(f"{did}:{fp}:v2".encode()
 def proposal_digest(p):
     return sha256_obj({"dossierId":p["dossierId"],"callId":p["callId"],"action":p["action"],"target":p["target"],"payload":p["payload"],"evidence":sorted(p["evidence"])})
 
-def decision_fingerprint(d):
-    # Versioning forces a fresh model decision when decision logic changes,
-    # while remaining stable across grader evaluations for the same version.
-    return sha256_obj({"dossier":d,"decisionVersion":DECISION_VERSION})
-
 def get_proposals(ds):
     cached,missing={},[]
     with db() as c:
         for d in ds:
-            fp=decision_fingerprint(d); row=c.execute("SELECT proposal_json FROM decisions WHERE dossier_id=? AND fingerprint=?",(d["dossierId"],fp)).fetchone()
+            fp=sha256_obj(d); row=c.execute("SELECT proposal_json FROM decisions WHERE dossier_id=? AND fingerprint=?",(d["dossierId"],fp)).fetchone()
             (cached.__setitem__(d["dossierId"],json.loads(row["proposal_json"])) if row else missing.append(d))
     generated={}
     if missing:
         items=call_model(missing); require(set(items)=={d["dossierId"] for d in missing},502,"Incomplete model results")
-        items=review_proposals(missing,items)
         with db() as c:
             c.execute("BEGIN IMMEDIATE")
             try:
                 for d in missing:
-                    did,fp=d["dossierId"],decision_fingerprint(d)
+                    did,fp=d["dossierId"],sha256_obj(d)
                     old=c.execute("SELECT proposal_json FROM decisions WHERE dossier_id=? AND fingerprint=?",(did,fp)).fetchone()
                     if old: generated[did]=json.loads(old["proposal_json"]); continue
                     b=validate_item(d,items[did])
