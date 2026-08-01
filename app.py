@@ -296,7 +296,11 @@ def execute_once(proposal: Dict[str, Any], receipt: Dict[str, Any]) -> Dict[str,
 def health():
     return {"ok": True, "service": "safe-ai-mailroom-agent"}
 
+@app.post("/")
+@app.post("/mailroom")
+@app.post("/actions")
 @app.post("/v1/mailroom/actions")
+@app.post("/v1/mailroom/actions/")
 async def mailroom(request: Request):
     raw = await request.body()
     if len(raw) > MAX_BODY:
