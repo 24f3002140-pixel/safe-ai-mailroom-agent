@@ -68,7 +68,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Safe AI Mailroom Agent v2", lifespan=lifespan)
 
-# Render Deployment Route Fixing 405 Errors
 @app.api_route("/", methods=["GET", "HEAD"])
 async def platform_health_check(request: Request):
     return Response(status_code=200)
@@ -84,7 +83,7 @@ def validate_propose(b):
     require(rv["algorithm"] == "Ed25519", 422, "Unsupported receipt algorithm")
     jwk = rv["publicKeyJwk"]; require(isinstance(jwk, dict) and jwk.get("kty") == "OKP" and jwk.get("crv") == "Ed25519" and isinstance(jwk.get("x"), str), 422, "Invalid Ed25519 JWK")
     co = b["corpus"]; require(isinstance(co, dict) and set(co) == {"coreId", "auditId", "stableCount", "freshCount"}, 422, "Invalid corpus")
-    require(isinstance(co["stableCount"],int) and isinstance(co["freshCount"],int), 422, "Invalid counts")
+    require(isinstance(co["stableCount"], int) and isinstance(co["freshCount"], int), 422, "Invalid counts")
     require(isinstance(b["allowedActions"], list) and len(b["allowedActions"]) == 6 and set(b["allowedActions"]) == ALLOWED_ACTIONS, 422, "Invalid allowedActions")
     ds = b["dossiers"]; require(isinstance(ds, list) and ds, 422, "Invalid dossiers")
     require(len(ds) == co["stableCount"] + co["freshCount"], 422, "Dossier count mismatch")
@@ -168,3 +167,6 @@ def call_gemini_for_dossier(dossier: Dict[str, Any]) -> Dict[str, Any]:
         "action": "no_action",
         "target": None,
         "payload": {"reasonCode": "INFORMATIONAL", "referenceId": "fallback-err"},
+        "evidenceLineIds": []
+    }
+
