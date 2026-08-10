@@ -1,9 +1,14 @@
-SAFE AI MAILROOM AGENT - FIXED PROJECT
+SAFE AI MAILROOM AGENT - BATCHED FIX
 
-FILES
------
-app.py
-requirements.txt
+WHY THIS VERSION
+----------------
+The previous version sent one Gemini request per dossier. The grader sends
+64 stable dossiers + 3 fresh dossiers in one evaluation, so the free-tier
+15 requests/minute quota was exceeded.
+
+This version batches up to 8 uncached dossiers into ONE Gemini request.
+Typical first evaluation: 67 dossiers -> 9 Gemini requests.
+Typical second evaluation: 64 cached + 3 new -> 1 Gemini request.
 
 RENDER SETTINGS
 ---------------
@@ -13,22 +18,12 @@ pip install -r requirements.txt
 Start Command:
 gunicorn -k uvicorn.workers.UvicornWorker -w 1 --timeout 120 --graceful-timeout 120 -b 0.0.0.0:$PORT app:app
 
-Required Environment Variables:
-GEMINI_API_KEY = your Gemini API key
+Environment:
+GEMINI_API_KEY = your valid Google AI Studio Gemini key
 GEMINI_MODEL = gemini-3.1-flash-lite
+MODEL_BATCH_SIZE = 8
 PYTHON_VERSION = 3.11.11
-
-Optional:
-DB_PATH = /tmp/mailroom.db
-MODEL_TIMEOUT_SECONDS = 45
-MAX_BODY_BYTES = 524288
 
 IITM ENDPOINT
 -------------
 https://safe-ai-mailroom-agent-aqwt.onrender.com/v1/mailroom/actions
-
-IMPORTANT
----------
-This version sends the Gemini key using the x-goog-api-key HTTP header instead
-of putting ?key=... in the URL. It also prints GEMINI ERROR details in Render
-logs if Google rejects the request.
