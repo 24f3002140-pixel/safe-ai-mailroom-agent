@@ -312,8 +312,12 @@ def call_gemini_for_dossier(dossier: Dict[str, Any]) -> Dict[str, Any]:
     url = (
         "https://generativelanguage.googleapis.com/"
         f"v1beta/models/{GEMINI_MODEL}:generateContent"
-        f"?key={GEMINI_API_KEY}"
     )
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY,
+    }
 
     payload = {
         "contents": [{
@@ -328,7 +332,12 @@ def call_gemini_for_dossier(dossier: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     try:
-        response = requests.post(url, json=payload, timeout=MODEL_TIMEOUT)
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=MODEL_TIMEOUT,
+        )
     except requests.RequestException as exc:
         print("GEMINI REQUEST ERROR:", repr(exc), flush=True)
         raise HTTPException(status_code=502, detail="Gemini request failed")
