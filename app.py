@@ -23,6 +23,15 @@ MODEL_WORKERS = int(os.getenv("MODEL_WORKERS", "4"))
 DECISION_VERSION = os.getenv("DECISION_VERSION", "evidence-v6")
 ALLOWED_ACTIONS = {"create_draft", "update_internal_record", "send_approved_notice", "request_confirmation", "quarantine_item", "no_action"}
 
+RULES = {
+    "create_draft": {"target_kind": "draft_queue", "target_prefix": "mailbox:", "payload_keys": {"recipient", "referenceId", "status", "template"}, "fixed": {"template": "order_status"}},
+    "update_internal_record": {"target_kind": "case_record", "payload_keys": {"field", "sourceEventId", "value"}, "fixed": {"field": "delivery_window"}},
+    "send_approved_notice": {"target_kind": "email", "payload_keys": {"referenceId", "status", "template"}, "fixed": {"template": "approved_delivery_notice"}},
+    "request_confirmation": {"target_kind": "approval_queue", "payload_keys": {"claimedSender", "questionCode", "referenceId"}, "fixed": {"questionCode": "VERIFY_REQUEST"}},
+    "quarantine_item": {"target_kind": "security_queue", "target_exact": "mailroom", "payload_keys": {"artifactId", "reasonCode"}, "fixed": {"reasonCode": "INDIRECT_PROMPT_INJECTION"}},
+    "no_action": {"target_none": True, "payload_keys": {"reasonCode", "referenceId"}, "reason_codes": {"ALREADY_COMPLETED", "DUPLICATE", "INFORMATIONAL"}},
+}
+
 def canonical(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -137,7 +146,7 @@ def call_gemini_for_dossier(dossier: Dict[str, Any]) -> Dict[str, Any]:
         res = requests.post(url, json=payload, timeout=MODEL_TIMEOUT)
         if res.status_code == 200:
             res_json = res.json()
-            txt = res_json["candidates"]["content"]["parts"]["text"]
+            txt = res_json["candidates"][0]["content"]["parts"][0]["text"]
             parsed = json.loads(txt)
             return {
                 "dossierId": dossier["dossierId"],
@@ -157,34 +166,5 @@ def call_gemini_for_dossier(dossier: Dict[str, Any]) -> Dict[str, Any]:
         "evidenceLineIds": []
     }
 
-# Unified dynamic handling of Root Path operational logic
-@app.route("/", methods=["GET", "HEAD", "POST"])
-async def root_router(request: Request):
-    # Route platform keep-alives and validation calls clean
-    if request.method in ("GET", "HEAD"):
-        return Response(status_code=200)
-
-    body_bytes = await request.body()
-    if len(body_bytes) > MAX_BODY:
-        raise HTTPException(status_code=413, detail="Payload too large")
-    try:
-        body = json.loads(body_bytes.decode("utf-8"))
-    except Exception:
-        raise HTTPException(status_code=400, detail="Malformed JSON")
-
-    operation = body.get("operation")
-    input_fingerprint = sha256_obj(body)
-
-    if operation == "propose":
-        validate_propose(body)
-        dossiers = body["dossiers"]
-        proposals = []
-        
-        with ThreadPoolExecutor(max_workers=MODEL_WORKERS) as executor:
-            futures = [executor.submit(call_gemini_for_dossier, d) for d in dossiers]
-            for fut in as_completed(futures):
-                proposals.append(fut.result())
-
-        response_data = {
-            "profile": PROFILE,
-            "operation": "propose_response",
+# FastAPI requires routers to use .api_route() for explicit lists of HTTP verbs
+@app.api_route("/", methods=["GET", "HEAD", "POST"])
