@@ -1125,15 +1125,18 @@ def call_gemini_for_dossier(
             ),
         )
 
-    if response.status_code != 200:
+  if response.status_code != 200:
+    print(
+        "GEMINI ERROR:",
+        response.status_code,
+        response.text[:2000],
+        flush=True,
+    )
 
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Model returned HTTP "
-                + str(response.status_code)
-            ),
-        )
+    raise HTTPException(
+        status_code=502,
+        detail="Gemini API request failed",
+    )
 
     try:
 
